@@ -1,7 +1,8 @@
 """
-어제의 박스오피스 순위를 보여주는 스트림릿 앱
+날짜를 골라 그날의 박스오피스 순위를 보여주는 스트림릿 앱
 - KOBIS(영화진흥위원회) 일별 박스오피스 API 사용
 - 스트림릿 클라우드 배포용 (secrets.toml에 KOBIS_KEY 필요)
+- 고를 수 있는 가장 늦은 날짜는 '어제(한국 시간 기준)'까지
 """
 
 import streamlit as st
@@ -12,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 # ----------------------------------------------------------------
 # 0) 기본 설정
 # ----------------------------------------------------------------
-st.set_page_config(page_title="어제의 박스오피스", page_icon="🎬", layout="wide")
+st.set_page_config(page_title="박스오피스", page_icon="🎬", layout="wide")
 
 # KOBIS API 주소 (공식 문서에 나온 그대로)
 API_URL = "https://www.kobis.or.kr/kobisopenapi/webservice/rest/boxoffice/searchDailyBoxOfficeList.json"
@@ -25,13 +26,14 @@ NUMERIC_COLS = ["rank", "rankInten", "audiCnt", "audiAcc", "scrnCnt", "showCnt"]
 # 1) '어제' 날짜를 한국 시간(KST) 기준으로 계산
 #    - 배포 서버의 시계가 한국 시간이 아닐 수 있으므로,
 #      UTC 시각을 구한 뒤 +9시간을 더해서 직접 한국 시간을 만든다.
+#    - 달력에서 고를 수 있는 가장 늦은 날짜로도 쓰인다
+#      (오늘 것은 아직 집계 전이라 어제까지만 고를 수 있게 함).
 # ----------------------------------------------------------------
-def get_yesterday_kst() -> str:
-    """한국 시간(KST) 기준 '어제' 날짜를 yyyymmdd 형식 문자열로 반환한다."""
+def get_yesterday_kst_date():
+    """한국 시간(KST) 기준 '어제' 날짜를 date 객체로 반환한다."""
     kst = timezone(timedelta(hours=9))
     now_kst = datetime.now(timezone.utc).astimezone(kst)
-    yesterday_kst = now_kst - timedelta(days=1)
-    return yesterday_kst.strftime("%Y%m%d")
+    return (now_kst - timedelta(days=1)).date()
 
 
 # ----------------------------------------------------------------
@@ -83,7 +85,7 @@ def fetch_box_office(target_dt: str):
 
     # 2-6) 영화 목록이 비어 있는 경우 (예: 아직 집계되지 않은 날짜)
     if not movie_list:
-        return False, "해당 날짜의 박스오피스 데이터가 비어 있습니다. 아직 집계가 완료되지 않았거나 조회 날짜가 잘못되었을 수 있습니다."
+        return False, "그날은 아직 집계 전입니다. 다른 날짜를 골라 주세요."
 
     return True, movie_list
 
@@ -101,14 +103,42 @@ def to_numeric_dataframe(movie_list: list) -> pd.DataFrame:
 
 
 # ----------------------------------------------------------------
+# 3-1) 표에 보여줄 영화명 꾸미기
+#    - 전날보다 순위가 오르면(rankInten 양수) 빨간 위 화살표(🔺)
+#    - 전날보다 순위가 내리면(rankInten 음수) 파란 아래 화살표(🔽)
+#    - 누적관객이 100만 명을 넘으면 트로피(🏆) 이모지
+# ----------------------------------------------------------------
+def build_display_name(row) -> str:
+    if row["rankInten"] > 0:
+        arrow = "🔺"
+    elif row["rankInten"] < 0:
+        arrow = "🔽"
+    else:
+        arrow = ""
+
+    trophy = "🏆" if row["audiAcc"] >= 1_000_000 else ""
+
+    parts = [p for p in [arrow, row["movieNm"], trophy] if p]
+    return " ".join(parts)
+
+
+# ----------------------------------------------------------------
 # 4) 메인 화면 구성
 # ----------------------------------------------------------------
 def main():
-    st.title("🎬 어제의 박스오피스")
+    st.title("🎬 박스오피스")
 
-    target_dt = get_yesterday_kst()
+    # 달력에서 날짜를 고르되, 가장 늦은 날짜는 '어제(한국 시간 기준)'까지만 허용
+    # (오늘 것은 아직 집계 전이라 고를 수 없게 함)
+    max_date = get_yesterday_kst_date()
+    selected_date = st.date_input(
+        "조회할 날짜를 골라 주세요",
+        value=max_date,
+        max_value=max_date,
+    )
+    target_dt = selected_date.strftime("%Y%m%d")
     pretty_date = f"{target_dt[:4]}년 {target_dt[4:6]}월 {target_dt[6:]}일"
-    st.caption(f"조회 날짜(한국 시간 기준 어제): {pretty_date}")
+    st.caption(f"조회 날짜: {pretty_date}")
 
     # API 호출 (실패 시 안내 메시지를 보여주고 화면을 멈춤)
     ok, result = fetch_box_office(target_dt)
@@ -123,10 +153,10 @@ def main():
     # 4-1) 1위 영화: 지표 카드 3장
     # -------------------------------
     top_movie = df.iloc[0]
-    st.subheader(f"오늘의 1위: {top_movie['movieNm']}")
+    st.subheader(f"{pretty_date} 1위: {top_movie['movieNm']}")
 
     col1, col2, col3 = st.columns(3)
-    col1.metric("어제 관객수", f"{int(top_movie['audiCnt']):,}명")
+    col1.metric("관객수", f"{int(top_movie['audiCnt']):,}명")
     col2.metric("누적 관객수", f"{int(top_movie['audiAcc']):,}명")
     col3.metric("스크린수", f"{int(top_movie['scrnCnt']):,}개")
 
@@ -147,7 +177,10 @@ def main():
     # 4-3) 전체 순위 표
     # -------------------------------
     st.subheader("전체 순위")
+    st.caption("🔺 전날보다 순위 상승 · 🔽 전날보다 순위 하락 · 🏆 누적관객 100만 명 이상")
+
     display_df = df[["rank", "movieNm", "openDt", "audiCnt", "audiAcc", "scrnCnt"]].copy()
+    display_df["movieNm"] = df.apply(build_display_name, axis=1)
     display_df.columns = ["순위", "영화명", "개봉일", "관객수", "누적관객", "스크린수"]
 
     # 표에서 보기 좋게 천 단위 콤마 서식 적용
